@@ -1,9 +1,16 @@
 {
   "name": "com.bernatrosello.nearby-connections-transport",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "displayName": "Nearby Connections Transport",
   "description": "A custom transport implementation with Nearby Connections for Unity Netcode for GameObjects.",
   "unity": "6000.2",
+  "samples": [
+    {
+      "displayName": "Permission Dialog Prefab Example",
+      "description": "This is a placeholder for a dialog to point the user to the App's permissions settings whenever the permission dialog no longer pops up due to being denied too many times.",
+      "path": "Samples~/BasicPermissionDialog"
+    }
+  ],
   "dependencies": {
     "com.unity.netcode.gameobjects": "2.7.0",
     "com.google.external-dependency-manager": "1.2.186"
