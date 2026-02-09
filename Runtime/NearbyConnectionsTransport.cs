@@ -89,6 +89,7 @@ namespace Netcode.Transports.NearbyConnections
                 return sdk >= minSdkNum && sdk <= maxSdkNum;
             }
 
+            public bool IsRuntimePermission() { return IsRuntimePermission(AndroidVersion()); }
             public bool IsRuntimePermission(int sdk)
             {
                 if (RuntimePermission && AppliesTo(sdk))
@@ -267,7 +268,7 @@ namespace Netcode.Transports.NearbyConnections
                 }
                 else
                 {
-                    internalLogger.LogWarning(kTag, "Couldn't get ServerClientId because endpoint is NOT connected to a server");
+                    internalLogger.LogWarning(kTag, "Couldn't get ServerClientId because local endpoint is NOT connected to a server");
                     return "";
                 }
             }
@@ -341,6 +342,8 @@ namespace Netcode.Transports.NearbyConnections
         [SerializeField] bool messageLogging;
         [SerializeField] bool internalLogging;
         private static string kTag = "NBC-Transport";
+        private enum DeferredStart { none, server, client };
+        private DeferredStart deferredStart = DeferredStart.none;
         private bool PermissionsReady
         {
             get
@@ -350,7 +353,7 @@ namespace Netcode.Transports.NearbyConnections
                 {
                     if (!AndroidPermissionCheck.HasPermission(perm.Name))
                     {
-                        connectionLogger.LogWarning(kTag, $"Permission {perm.Name} granted=FALSE !");
+                        connectionLogger.LogWarning(kTag, $"Permission {perm.Name} granted=FALSE");
                         return false;
                     }
                 }
@@ -472,7 +475,7 @@ namespace Netcode.Transports.NearbyConnections
             if (s_instance == null) return;
             if (s_instance.IsKnownEndpoint(endpointId))
             {
-                internalLogger.LogWarning(kTag, $"Yeah this endpoint[{endpointId}] was already registered, but it's probably a bug so pls look into it. Proceeding to remove endpoint data and RE-Register it...");
+                internalLogger.LogError(kTag, $"Yeah this endpoint[{endpointId}] was already registered, but it's probably a bug so pls look into it. Proceeding to remove endpoint data and RE-Register it...");
                 s_instance.RemoveEndpointData(endpointId);
             }
             s_instance._transportIds.AddServer(endpointId);
@@ -697,13 +700,33 @@ namespace Netcode.Transports.NearbyConnections
         {
             if (!PermissionsReady)
             {
-                connectionLogger.LogError(NBCTransport.kTag, "Can't start transport, because necessary permissions haven't been granted by the user");
-                StartCoroutine(RequestPermissions());
+                // Means we are being called through deferred call in RequestPermission()
+                if (deferredStart == DeferredStart.server)
+                {
+                    foreach (var perm in NearbyPermissionDefinitions.ActivePermissions)
+                    {
+                        // work around for permanently disabled permissions
+                        if (!perm.IsRuntimePermission() && !Permission.ShouldShowRequestPermissionRationale(perm.Name))
+                        {
+                            // Skip requesting permissions because the dialog has been permanentyl dismissed
+                            ShowGoToSettingsDialog(perm.Name);
+                            deferredStart = DeferredStart.none;
+                        }
+                    }
+                }
+                else
+                {
+                    deferredStart = DeferredStart.server;
+                    connectionLogger.LogWarning(NBCTransport.kTag, "Can't start transport, because necessary permissions haven't been granted by the user");
+                    StartCoroutine(RequestPermissions());
+                }
                 return false;
             }
-
-            if (AutoAdvertise)
+            else if (AutoAdvertise)
+            {
                 StartAdvertising();
+            }
+            deferredStart = DeferredStart.none;
             return true;
         }
 
@@ -711,11 +734,33 @@ namespace Netcode.Transports.NearbyConnections
         {
             if (!PermissionsReady)
             {
+                // Means we are being called through deferred call in RequestPermission()
+                if (deferredStart == DeferredStart.client)
+                {
+                    foreach (var perm in NearbyPermissionDefinitions.ActivePermissions)
+                    {
+                        // work around for permanently disabled permissions
+                        if (!perm.IsRuntimePermission() && !Permission.ShouldShowRequestPermissionRationale(perm.Name))
+                        {
+                            // Skip requesting permissions because the dialog has been permanentyl dismissed
+                            ShowGoToSettingsDialog(perm.Name);
+                            deferredStart = DeferredStart.none;
+                        }
+                    }
+                }
+                else
+                {
+                    deferredStart = DeferredStart.client;
+                    connectionLogger.LogWarning(NBCTransport.kTag, "Can't start transport, because necessary permissions haven't been granted by the user");
+                    StartCoroutine(RequestPermissions());
+                }
                 return false;
             }
-
-            if (AutoBrowse)
+            else if (AutoBrowse)
+            {
                 StartBrowsing();
+            }
+            deferredStart = DeferredStart.none;
             return true;
         }
 
@@ -739,8 +784,18 @@ namespace Netcode.Transports.NearbyConnections
             var callbacks = new PermissionCallbacks();
             Permission.RequestUserPermissions(NearbyPermissionDefinitions.RuntimePermissions.Select(perm => perm.Name).ToArray(), callbacks);
             // wait a few seconds just in case before shwoing pop up
-            yield return 3f;
+            yield return 0.1f;
             callbacks.PermissionDenied += (string _) => { ShowGoToSettingsDialog(_); };
+
+            // Deferred server start
+            if (deferredStart == DeferredStart.server)
+            {
+                StartServer();
+            }
+            else if (deferredStart == DeferredStart.client)
+            {
+                StartClient();
+            }
 #endif
             yield return null;
         }
@@ -847,7 +902,7 @@ namespace Netcode.Transports.NearbyConnections
             {
                 // This function call might be unnsecessary (it might be desried behaviour to keep partial connections, requests etc, around...)
                 s_instance.RemoveUnconnectedEndpointData();
-                
+
                 NBC_StopAdvertising();
                 _isAdvertising = false;
             }
@@ -889,25 +944,26 @@ namespace Netcode.Transports.NearbyConnections
 
         public void ApproveConnectionRequest(string endpointId)
         {
-            if (s_instance.IsKnownEndpoint(endpointId)) 
+            if (s_instance.IsKnownEndpoint(endpointId))
             {
                 if (s_instance.IsAdvertising && s_instance._endpointStatuses[endpointId] == EndpointStatus.REQUESTING)
                 {
                     s_instance.OnAdvertiserApprovedConnectionRequest?.InvokeOnMainThread(endpointId);
-                    NBC_AcceptConnection(endpointId); 
+                    NBC_AcceptConnection(endpointId);
                 }
                 else if (s_instance.IsBrowsing && s_instance._endpointStatuses[endpointId] == EndpointStatus.REQUESTED)
                 {
                     s_instance.OnBrowserApprovedConnectionRequest?.InvokeOnMainThread(endpointId);
-                    NBC_AcceptConnection(endpointId); 
-                } else
+                    NBC_AcceptConnection(endpointId);
+                }
+                else
                 {
-                    internalLogger.LogWarning(kTag, "Tried to approve a connection request of a known endpoint that was in invalid pre-approval state: " + s_instance._endpointStatuses[endpointId]);
+                    internalLogger.LogError(kTag, "Tried to approve a connection request of a known endpoint that was in invalid pre-approval state: " + s_instance._endpointStatuses[endpointId]);
                 }
             }
             else
             {
-                internalLogger.LogWarning(kTag, "Tried to approve a connection request to an un-registered endpoint (UNDEFINED BEHAVIOUR). Ignoring Approval attempt!");
+                internalLogger.LogError(kTag, "Tried to approve a connection request to an un-registered endpoint (UNDEFINED BEHAVIOUR). Ignoring Approval attempt!");
             }
         }
 
@@ -953,14 +1009,12 @@ namespace Netcode.Transports.NearbyConnections
             if (IsConnectedTransportClient(transportId))
             {
                 var epId = _transportIds[transportId];
-                //if (_endpointStatuses[epId] != EndpointStatus.CONNECTED)
-                //    connectionLogger.LogWarning(kTag, $"Tried to disconnect client with transportId[{transportId}], but its status was [{_endpointStatuses[epId]}] not CONNECTED!");
-                connectionLogger.LogWarning(kTag, $"Calling NBC to disconnect client with transportId[{transportId}]");
+                connectionLogger.Log(kTag, $"Calling NBC to disconnect client with transportId[{transportId}]");
                 NBC_Disconnect(epId);
             }
             else
             {
-                connectionLogger.LogWarning(kTag, $"Tried to disconnect client with transportId[{transportId}], but it wasn't connected");
+                connectionLogger.LogError(kTag, $"Tried to disconnect client with transportId[{transportId}], but it wasn't connected");
             }
         }
 
@@ -988,7 +1042,7 @@ namespace Netcode.Transports.NearbyConnections
 
         private void RemoveAllEndpointsData()
         {
-            foreach(var ep in GetAllEndpoints())
+            foreach (var ep in GetAllEndpoints())
             {
                 RemoveEndpointData(ep.id);
             }
